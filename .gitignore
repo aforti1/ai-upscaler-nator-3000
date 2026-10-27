@@ -1,0 +1,6 @@
+tools/engine/
+tools/*.zip
+cache/
+outputs/
+__pycache__/
+*.pyc
