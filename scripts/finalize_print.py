@@ -16,6 +16,10 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageCms, ImageEnhance, ImageOps
 
+# Two x4 passes on a ~900 px source exceed Pillow's ~179 MP decompression-bomb guard;
+# inputs here are our own local neural intermediates, so the guard only gets in the way.
+Image.MAX_IMAGE_PIXELS = None
+
 
 def positive_int(value: str) -> int:
     parsed = int(value)

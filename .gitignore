@@ -4,3 +4,14 @@ cache/
 outputs/
 __pycache__/
 *.pyc
+
+# Personal files stay local: this repo is public, and outputs belong in outputs/
+fonts/
+proofs/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.heic
+*.tif
+*.tiff
