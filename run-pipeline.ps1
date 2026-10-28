@@ -1,11 +1,11 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [Alias('Input')]
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$InputPath,
 
-    [ValidateRange(1, 2)]
+    [ValidateRange(1, 3)]
     [int]$Passes = 2,
 
     [ValidateRange(32, 2048)]
@@ -82,12 +82,76 @@ function Invoke-RealEsrganPass {
     }
 }
 
-$Current = $ResolvedInput
-for ($Stage = 1; $Stage -le $Passes; $Stage++) {
-    $Next = Join-Path $CacheRoot ("ai-pass-{0}-x{1}.png" -f $Stage, ([math]::Pow(4, $Stage)))
-    Invoke-RealEsrganPass -Source $Current -Destination $Next -Stage $Stage
-    $Current = $Next
+function Invoke-AiPasses {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    $Result = $Source
+    for ($Stage = 1; $Stage -le $Passes; $Stage++) {
+        $Next = Join-Path $CacheRoot ("{0}-ai-pass-{1}-x{2}.png" -f $Label, $Stage, ([math]::Pow(4, $Stage)))
+        Invoke-RealEsrganPass -Source $Result -Destination $Next -Stage $Stage
+        $Result = $Next
+    }
+    return $Result
 }
+
+$AlphaTools = Join-Path $ProjectRoot 'scripts\alpha_tools.py'
+$IsTransparent = (& $Python $AlphaTools probe --input $ResolvedInput) -eq 'transparent'
+
+if ($IsTransparent) {
+    # The engine and the JPEG finisher both drop transparency, so a transparent image is
+    # split into an alpha mask (and colour, if it varies), upscaled, and recombined as a PNG.
+    $TargetWidthPx = [int][math]::Round($PrintWidthIn * $Ppi)
+    $OutputName = '{0}__{1}__realesrgan-{2}pass__{3}px_wide_transparent.png' -f $SafeStem, $RunId, $Passes, $TargetWidthPx
+    $OutputPath = Join-Path $OutputRoot $OutputName
+    $ManifestPath = Join-Path $OutputRoot ($OutputName -replace '\.png$', '.json')
+    $MaskPath = Join-Path $CacheRoot 'alpha-mask.png'
+    $ColorPath = Join-Path $CacheRoot 'color.png'
+
+    Write-Host "`nTransparent image detected: upscaling the alpha mask separately." -ForegroundColor Cyan
+    $ColorInfo = & $Python $AlphaTools split --input $ResolvedInput --mask $MaskPath --color $ColorPath
+    if ($LASTEXITCODE -ne 0) { throw 'Could not split the transparent image.' }
+
+    $MergeArgs = @('--output', $OutputPath, '--width', $TargetWidthPx, '--ppi', $Ppi)
+    $MergeArgs += @('--mask', (Invoke-AiPasses -Source $MaskPath -Label 'alpha'))
+    if ($ColorInfo -like 'solid *') {
+        $MergeArgs += @('--solid') + ($ColorInfo -split ' ')[1..3]
+    } else {
+        $MergeArgs += @('--color', (Invoke-AiPasses -Source $ColorPath -Label 'color'))
+    }
+
+    & $Python $AlphaTools merge @MergeArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Transparent merge failed. The AI intermediates have been preserved in cache for inspection.'
+    }
+
+    [ordered]@{
+        source = $ResolvedInput
+        source_sha256 = (Get-FileHash -LiteralPath $ResolvedInput -Algorithm SHA256).Hash
+        ai_engine = 'Real-ESRGAN ncnn Vulkan (official v0.2.5.0 bundle)'
+        ai_model = 'realesrgan-x4plus'
+        ai_passes = $Passes
+        tile_size = $Tile
+        gpu_id = if ($GpuId -ge 0) { $GpuId } else { 'auto' }
+        transparent = $true
+        colour = $ColorInfo
+        final_width_px = $TargetWidthPx
+        ppi = $Ppi
+        output = $OutputPath
+        cache = $CacheRoot
+        created_local = (Get-Date).ToString('o')
+        note = 'Height follows the source aspect ratio; -PrintHeightIn, -Grain and -JpegQuality are ignored for transparent images.'
+    } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $ManifestPath -Encoding utf8
+
+    Write-Host "`nComplete." -ForegroundColor Green
+    Write-Host "Transparent PNG: $OutputPath"
+    Write-Host "Manifest:        $ManifestPath"
+    return
+}
+
+$Current = Invoke-AiPasses -Source $ResolvedInput -Label 'ai'
 
 $TargetWidthPx = [int][math]::Round($PrintWidthIn * $Ppi)
 $TargetHeightPx = [int][math]::Round($PrintHeightIn * $Ppi)
